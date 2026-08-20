@@ -12,14 +12,14 @@ A model like this — hazard ratios for baseline prognostic factors, checked for
 
 ## 3. Cohorts and methods
 
-**Development cohort**: `rotterdam` (R `survival` package), n = 2982, breast cancer surgeries between 1978 and 1993.
-**External validation cohort**: `gbsg` (R `survival` package), n = 686, drawn from the GBSG-2 trial — which enrolled **node-positive patients only**, a case-mix difference from `rotterdam` that matters for how the validation result should be read (Section 4).
+**Development cohort**: `rotterdam` (R `survival` package), n = 2982, breast cancer surgeries between 1978 and 1993 (Foekens et al., 2000).
+**External validation cohort**: `gbsg` (R `survival` package), n = 686, drawn from the GBSG-2 trial (Schumacher et al., 1994) — which enrolled **node-positive patients only**, a case-mix difference from `rotterdam` that matters for how the validation result should be read (Section 4).
 
 **Endpoint**: recurrence-free survival — time to whichever of recurrence or death comes first, in years. `rotterdam` records recurrence and death as two separate time/event pairs; naively taking `pmin()` of the two time columns silently mis-times the event for a small subset of patients where the last disease-free assessment predates the actual death date. The endpoint was constructed to route on which event was observed, not on which time value was smaller — see `analysis.Rmd` for the full check (43 of 2982 patients affected by this if handled naively).
 
 **Covariates**: age, menopausal status, tumour size (categorical, ≤20/20–50/>50mm), nodes (log-transformed after a martingale-residual check showed the raw count's effect on log-hazard saturates rather than staying linear), grade, hormonal therapy, chemotherapy.
 
-**Model**: Cox proportional hazards, adjusted for all baseline covariates simultaneously. Proportional hazards was checked with `cox.zph()` — printed test and residual plots both — and violated for four of the seven covariates; those four were re-fit with time-varying coefficients (`tt()`) rather than reported as if the assumption held. R's standard validation tools (`concordance()`, `survfit()`, `pec()`) cannot process a `coxph` object with `tt()` terms, so a separate flat (time-fixed) model is used for calibration, Brier score, and bootstrap validation, while the time-varying model's own discrimination is assessed at fixed follow-up horizons using its own fitted coefficients. External validation uses a version of the flat model without `chemo` (not recorded in `gbsg`).
+**Model**: Cox proportional hazards (Cox, 1972), adjusted for all baseline covariates simultaneously. Proportional hazards was checked with `cox.zph()` — printed test and residual plots both — and violated for four of the seven covariates; those four were re-fit with time-varying coefficients (`tt()`) rather than reported as if the assumption held. R's standard validation tools (`concordance()`, `survfit()`, `pec()`) cannot process a `coxph` object with `tt()` terms, so a separate flat (time-fixed) model is used for calibration, Brier score, and bootstrap validation, while the time-varying model's own discrimination is assessed at fixed follow-up horizons using its own fitted coefficients. External validation uses a version of the flat model without `chemo` (not recorded in `gbsg`).
 
 Full derivations, diagnostic checks, and code are in `analysis.Rmd` / `analysis.html`.
 
@@ -85,6 +85,8 @@ A further, harder limitation surfaced once validation began: `concordance()`, `s
 - Graf et al. (1999) — the Brier score / integrated Brier score for censored survival data (Section 5).
 - Andersen et al. (2012) — restricted mean survival time (RMST) as an effectiveness summary (Section 4).
 - Royston & Altman (2013) — principles for external validation of a Cox prognostic model, which the `rotterdam`/`gbsg` external validation here follows (Section 5).
+- Foekens et al. (2000) — the original cohort study underlying the `rotterdam` development data (Section 3).
+- Schumacher et al. (1994) — the GBSG-2 trial underlying the `gbsg` external validation cohort, including its node-positive-only enrollment (Section 3).
 
 ## 10. Files in this project
 
