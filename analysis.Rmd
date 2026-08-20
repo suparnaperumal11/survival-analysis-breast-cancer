@@ -1,0 +1,829 @@
+---
+title: "Recurrence-Free Survival in Breast Cancer: A Cox Model with External Validation"
+author: "Suparna Perumal"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+    code_folding: hide
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = TRUE, message = FALSE, fig.width = 8, fig.height = 5)
+```
+
+```{r libraries}
+library(survival)
+library(survminer)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(gtsummary)
+library(broom)
+library(survRM2)
+library(riskRegression) # time-dependent AUC and Brier score (Score())
+library(pec)            # integrated Brier score and calibration plots (pec(), calPlot())
+library(timeROC)        # time-dependent AUC for the time-varying-coefficient model
+
+set.seed(20260817)
+```
+
+# Introduction {-}
+
+*(written after the analysis — see README.md for the full framing)*
+
+## Purpose and scope of this analysis {-}
+
+This is a **prognostic-factor and prediction-model development and validation study**, not a causal treatment-effect analysis. Concretely:
+
+- **Association**: the hazard ratios in Steps 3–6 describe how outcomes differ across levels of a covariate in this observational data.
+- **Prognosis**: the model combines several covariates into a single risk model, intended to describe how risk varies across patients with different baseline profiles.
+- **Prediction**: Step 7 onward asks a different, complementary question — not "is this covariate associated with risk," but "how well does the fitted model discriminate and calibrate on data it wasn't fit to."
+- **Causal treatment effects**: this analysis does **not** attempt to estimate one, for `hormon` or `chemo`. Both are observational, non-randomised treatment assignments in these cohorts, and Step 3 documents confounding by indication for `hormon` specifically. Hazard ratios for these two variables are adjusted associations, not causal estimates — language throughout is kept to "associated with," not "reduces risk by" or "causes."
+
+# Data {-}
+
+```{r load-data}
+# rotterdam and gbsg are bundled together in one lazy-loaded object called `cancer`
+# in this survival package version (3.8.6+). Calling data(rotterdam, ...) directly
+# warns "not found" even though it works — data(cancer, ...) loads both correctly.
+data(cancer, package = "survival")
+
+dim(rotterdam)
+dim(gbsg)
+```
+
+# Endpoint construction
+
+Recurrence-free survival (RFS) is defined as the time from surgery to the earlier of recurrence or death, whichever comes first. `rotterdam` records these as two separate pairs of columns: `recur`/`rtime` (recurrence status and time) and `death`/`dtime` (death status and time).
+
+Before deriving the endpoint, I checked how these four columns relate to each other, because a naive derivation can silently misassign event times. The dataset splits into four groups (n = 2982, no missing values in any of the four columns):
+
+```{r endpoint-check}
+table(recur = rotterdam$recur, death = rotterdam$death)
+
+discordant <- rotterdam$recur == 0 & rotterdam$death == 1 & rotterdam$rtime != rotterdam$dtime
+gap_days   <- rotterdam$dtime[discordant] - rotterdam$rtime[discordant]
+cat("Discordant (died, no recorded recurrence, rtime != dtime):", sum(discordant), "\n")
+cat("Gap (days) — median:", median(gap_days), " range:", range(gap_days), "\n")
+```
+
+| Group | n | Event time issue? |
+|---|---|---|
+| No recurrence, alive (censored) | 1269 | `rtime == dtime` in all cases — no issue |
+| Recurred, alive at last follow-up | 441 | `rtime <= dtime` always — no issue |
+| Recurred and died | 1077 | `dtime >= rtime` always — no issue |
+| Died, no recorded recurrence | 195 | **43 of these have `rtime < dtime`** |
+
+The last row is the important one. `rtime` in this dataset records the time of the last disease-free assessment, not necessarily the date of death — a patient's final clinic exam can predate their actual death by months. For 43 of the 195 patients who died without recorded recurrence, `rtime` is earlier than `dtime` by a median of ~520 days (range 21–1811, both confirmed above). A construction like `pmin(rtime, dtime)` would take the smaller of the two and effectively backdate the death event to the last exam date, when the patient was in fact still alive and recurrence-free. That mislabels the event time for 43 of 2982 patients (1.4%) — small, but silent, and avoidable.
+
+The correct construction uses `recur` to decide which time column applies, rather than blindly taking the minimum:
+
+```{r endpoint}
+# Routes by which event was actually observed first, not by comparing magnitudes (pmin).
+rotterdam <- rotterdam %>%
+  mutate(
+    rfstime      = ifelse(recur == 1, rtime, dtime),
+    rfs_event    = as.integer(recur == 1 | death == 1),
+    rfstime_yrs  = rfstime / 365.25
+  )
+
+table(rfs_event = rotterdam$rfs_event)
+summary(rotterdam$rfstime_yrs)
+```
+
+No patients are excluded at this step — all 2982 are retained, split 1269 censored / 1713 events (441 recurrence-only + 1077 recurrence-then-death + 195 death-only).
+
+# Cohort description
+
+Before summarising, four of the seven baseline variables are recoded from plain 0/1/2/3 integers to labelled factors: `meno`, `grade`, `hormon`, `chemo`. This is not just cosmetic for the table — `grade` in `rotterdam` only takes values 2 and 3 (no grade 1 is recorded; the original study collapsed grade 1–2 into a single category), so it is treated here as a 2-level factor, not a 3-level one. `age` and `nodes` are left numeric. `size` is already a factor in the source data (`<=20`, `20-50`, `>50` mm). These conversions apply to `rotterdam` for the rest of the analysis, not just this table — that matters for the Cox model in Step 4, where factors get clean dummy-coding automatically.
+
+`nodes` is right-skewed (median 1, mean 2.7, max 34), so it's summarised as median [IQR] rather than mean ± SD.
+
+```{r cohort-table}
+rotterdam <- rotterdam %>%
+  mutate(
+    meno   = factor(meno,   levels = c(0, 1), labels = c("Premenopausal", "Postmenopausal")),
+    grade  = factor(grade,  levels = c(2, 3), labels = c("Grade 2", "Grade 3")),
+    hormon = factor(hormon, levels = c(0, 1), labels = c("No", "Yes")),
+    chemo  = factor(chemo,  levels = c(0, 1), labels = c("No", "Yes"))
+  )
+
+rotterdam %>%
+  select(age, meno, size, nodes, grade, hormon, chemo) %>%
+  tbl_summary(
+    statistic = list(
+      all_continuous()  ~ "{median} [{p25}, {p75}]",
+      all_categorical() ~ "{n} ({p}%)"
+    ),
+    label = list(
+      age    ~ "Age at surgery (years)",
+      meno   ~ "Menopausal status",
+      size   ~ "Tumour size",
+      nodes  ~ "Positive lymph nodes",
+      grade  ~ "Tumour grade",
+      hormon ~ "Hormonal therapy",
+      chemo  ~ "Chemotherapy"
+    )
+  ) %>%
+  bold_labels()
+```
+
+# Kaplan-Meier survival curves
+
+The overall Kaplan-Meier curve uses the full cohort; the second curve stratifies by hormonal therapy to check whether recurrence-free survival differs by treatment.
+
+```{r km-overall}
+fit_overall <- survfit(Surv(rfstime_yrs, rfs_event) ~ 1, data = rotterdam)
+fit_overall
+
+ggsurvplot(
+  fit_overall,
+  data = rotterdam,
+  risk.table = TRUE,
+  xlab = "Years since surgery",
+  ylab = "Recurrence-free survival probability",
+  title = "Overall recurrence-free survival — rotterdam cohort",
+  break.time.by = 2
+)
+```
+
+Overall median RFS is 6.73 years (95% CI 6.09–7.34), with 1713/2982 patients (57%) experiencing the event by end of follow-up.
+
+## Stratified by hormonal therapy — read with caution
+
+```{r km-hormon, fig.width=10, fig.height=6}
+fit_hormon <- survfit(Surv(rfstime_yrs, rfs_event) ~ hormon, data = rotterdam)
+fit_hormon
+
+ggsurvplot(
+  fit_hormon,
+  data = rotterdam,
+  risk.table = TRUE,
+  risk.table.y.text = FALSE,
+  pval = TRUE,
+  xlab = "Years since surgery",
+  ylab = "Recurrence-free survival probability",
+  title = "RFS by hormonal therapy — unadjusted",
+  legend.title = "Hormonal therapy",
+  legend.labs = c("No", "Yes"),
+  break.time.by = 2
+)
+```
+
+Patients who received hormonal therapy have markedly *worse* unadjusted RFS: median 4.78 years vs. 7.15 years for those who did not (log-rank p = 3×10⁻⁴). The curves do not cross — the treated group is worse at every checked time point (1, 3, 5, and 10 years) — so this isn't a case of an underpowered log-rank test masking a crossing pattern.
+
+**This result should not be read as "hormonal therapy is harmful."** `hormon` was not randomly assigned: in this era of practice, hormonal therapy was preferentially given to patients judged higher-risk (older, node-positive, larger tumours) — confounding by indication. An unadjusted curve conflates the effect of the treatment with the effect of the risk profile that led to the treatment being given. This is exactly why Step 4 fits an adjusted Cox model rather than stopping here.
+
+# Adjusted Cox model
+
+Before fitting, `nodes` needs a closer look: it's a count (0–34, median 1) and Cox models assume the log-hazard is *linear* in each numeric predictor. A martingale-residual check — fit the model without `nodes`, plot the residuals against `nodes`, look for a straight line at zero — shows a curved, saturating pattern instead:
+
+```{r nodes-martingale, fig.width=7, fig.height=5}
+fit_no_nodes <- coxph(Surv(rfstime_yrs, rfs_event) ~ age + meno + size + grade + hormon + chemo, data = rotterdam)
+mart_resid <- residuals(fit_no_nodes, type = "martingale")
+plot(rotterdam$nodes, mart_resid, pch = 20, col = rgb(0, 0, 0, 0.2),
+     xlab = "Positive lymph nodes", ylab = "Martingale residual (model without nodes)")
+lines(lowess(rotterdam$nodes, mart_resid, f = 0.3), col = "red", lwd = 2)
+abline(h = 0, lty = 2)
+```
+
+The residuals rise steeply for the first few positive nodes and then level off, rather than climbing at a constant rate all the way to 34 — a straight line would indicate `nodes` enters the log-hazard linearly, and this isn't one.
+
+I compared three specifications by AIC: `nodes` linear, a flexible penalised spline via `pspline(nodes)`, and `log(nodes + 1)` (the `+1` avoiding `log(0)` for node-negative patients). The spline's nonlinear term was significant at p < 2×10⁻¹⁶, supporting the conclusion that linear `nodes` is misspecified. `log(nodes + 1)` recovers nearly all of the spline's fit improvement while still producing one interpretable hazard ratio, so that's what's used below instead of raw `nodes`.
+
+```{r cox-model}
+rotterdam <- rotterdam %>%
+  mutate(log_nodes1 = log(nodes + 1))
+
+cox_fit <- coxph(
+  Surv(rfstime_yrs, rfs_event) ~ age + meno + size + log_nodes1 + grade + hormon + chemo,
+  data = rotterdam
+)
+
+summary(cox_fit)
+
+# exponentiate = TRUE converts log-hazard coefficients to hazard ratios.
+tidy(cox_fit, exponentiate = TRUE, conf.int = TRUE) %>%
+  select(term, estimate, conf.low, conf.high, p.value)
+```
+
+Once age, menopausal status, tumour size, node burden, grade, and chemotherapy are held constant, the hormonal therapy hazard ratio flips relative to the unadjusted step-3 result:
+
+| Predictor | HR | 95% CI | p |
+|---|---|---|---|
+| Age (per year) | 0.999 | 0.993–1.01 | 0.86 |
+| Postmenopausal (vs. pre) | 1.02 | 0.86–1.20 | 0.82 |
+| Size 20–50mm (vs. ≤20) | 1.31 | 1.17–1.46 | 1.3×10⁻⁶ |
+| Size >50mm (vs. ≤20) | 1.61 | 1.37–1.90 | 1.2×10⁻⁸ |
+| log(nodes+1) | 1.76 | 1.66–1.86 | 4.5×10⁻⁸⁵ |
+| Grade 3 (vs. 2) | 1.40 | 1.25–1.58 | 1.4×10⁻⁸ |
+| Hormonal therapy (vs. none) | **0.679** | **0.581–0.793** | 1.1×10⁻⁶ |
+| Chemotherapy (vs. none) | 0.678 | 0.588–0.782 | 9.0×10⁻⁸ |
+
+Concordance = 0.68 (se 0.007).
+
+Unadjusted (Step 3), hormonal therapy looked harmful (median RFS 4.78 vs. 7.15 years). Adjusted, it's associated with a 32% *lower* hazard (HR 0.679, 95% CI 0.581–0.793) — the sign flips once age, size, nodes, grade and chemotherapy are accounted for, consistent with confounding by indication: hormonal therapy was preferentially given to higher-risk patients, so the unadjusted comparison was dominated by that risk imbalance rather than the treatment itself. **This flip is a result to be cautious about, not to celebrate as clean.** A Cox model adjusts for *measured* confounders only; it cannot rule out unmeasured ones (e.g. receptor status, comorbidities) that also drove the treatment decision. The direction and magnitude are consistent with the published literature on hormonal therapy in ER-positive breast cancer, but this analysis does not establish that hormonal therapy caused a 32% risk reduction — only that the association survives adjustment for the confounders available here.
+
+`log(nodes+1)` is the strongest predictor by a wide margin (HR 1.76 per unit, p < 10⁻⁸⁰) — and, as it turns out, the variable most likely to violate proportional hazards, confirmed in the next section. `age` and menopausal status show no independent association once the other variables are in the model (both p > 0.8) — plausible, since their prognostic information likely overlaps with tumour size, grade and nodes.
+
+## A closer look at the nodes functional form
+
+The AIC comparison above favoured the penalised spline (25016.9) very slightly over `log(nodes+1)` (25020.5), and both are far better than linear `nodes` (25149.9). To see *why*, and to check whether that small AIC gap should change the decision, the three fitted shapes are plotted directly against each other:
+
+```{r nodes-form-plot, fig.width=8, fig.height=5.5}
+fit_spline_check <- coxph(
+  Surv(rfstime_yrs, rfs_event) ~ age + meno + size + pspline(nodes) + grade + hormon + chemo,
+  data = rotterdam
+)
+
+nodes_grid <- 0:34
+fit_linear_check <- coxph(
+  Surv(rfstime_yrs, rfs_event) ~ age + meno + size + nodes + grade + hormon + chemo,
+  data = rotterdam
+)
+
+data.frame(
+  specification = c("Linear", "Penalised spline", "log(nodes+1)"),
+  AIC = c(AIC(fit_linear_check), AIC(fit_spline_check), AIC(cox_fit))
+)
+
+lin_curve <- coef(fit_linear_check)["nodes"] * nodes_grid
+log_curve <- coef(cox_fit)["log_nodes1"] * log(nodes_grid + 1)
+
+# Extracts the spline's fitted shape directly rather than hand-deriving it.
+pred_spline <- predict(fit_spline_check, type = "terms", se.fit = FALSE)
+spline_col  <- grep("nodes", colnames(pred_spline), value = TRUE)
+spline_df   <- data.frame(nodes = rotterdam$nodes, term = pred_spline[, spline_col])
+spline_df   <- spline_df[!duplicated(spline_df$nodes), ]
+spline_df   <- spline_df[order(spline_df$nodes), ]
+spline_df$term <- spline_df$term - spline_df$term[spline_df$nodes == 0][1]  # center at nodes = 0
+
+plot_df <- rbind(
+  data.frame(nodes = nodes_grid, log_HR = lin_curve, spec = "Linear"),
+  data.frame(nodes = nodes_grid, log_HR = log_curve, spec = "log(nodes+1)"),
+  data.frame(nodes = spline_df$nodes, log_HR = spline_df$term, spec = "Penalised spline")
+)
+
+ggplot(plot_df, aes(x = nodes, y = log_HR, color = spec, linetype = spec)) +
+  geom_line(linewidth = 1) +
+  labs(x = "Positive lymph nodes", y = "Log hazard ratio (relative to nodes = 0)",
+       color = "Specification", linetype = "Specification",
+       title = "Functional form of nodes: three specifications compared") +
+  theme_minimal()
+```
+
+Reading the shapes rather than just the AIC numbers changes the picture. Over the range where most patients actually sit (0–15 nodes — the 90th percentile is 9), `log(nodes+1)` and the spline track each other closely, both saturating well below the linear specification's unbounded rise. Past about 20 nodes, where data are sparse (fewer than 5% of patients have >12 nodes), the spline's curve **dips and turns non-monotonic** — more nodes predicting slightly *lower* risk in that range before rising again. There's no biological reason to expect that; it's a sign of the spline overfitting a handful of extreme, sparse observations, not a genuine feature of the risk relationship.
+
+This is why `log(nodes+1)` is used instead of the spline despite its marginally worse AIC: the two specifications agree everywhere the data actually support a shape, `log(nodes+1)` stays smooth and monotonic where the spline doesn't, and it does all this with **one interpretable coefficient** instead of a multi-degree-of-freedom term with no single hazard ratio to report. A 3.6-point AIC difference is not a strong enough signal to trade a stable, interpretable, defensible specification for one that visibly overfits its own tails.
+
+# Proportional hazards check
+
+The Cox model in Step 4 assumes each covariate's hazard ratio is constant over follow-up time. `cox.zph()` tests this by correlating scaled Schoenfeld residuals against time for each covariate — a non-zero trend means the covariate's effect is changing over time, which is exactly what proportional hazards rules out. This check is run regardless of what it shows.
+
+```{r ph-check}
+zph <- cox.zph(cox_fit)
+zph
+```
+
+```{r ph-check-plot, fig.width=11, fig.height=10}
+ggcoxzph(zph, font.main = 10, point.size = 0.5)
+```
+
+The global test rejects proportional hazards outright (p = 1.1×10⁻¹²). Per-covariate, with n≈3000 in mind — a sample this large can flag a trend that's statistically real but practically negligible, so each one is read against its plot, not just its p-value:
+
+- **`size` (p ≈ 0) and `log(nodes+1)` (p ≈ 0) — real violations.** Both coefficients visibly decline over follow-up (`size`'s Beta(t) drifts from roughly +2 to −3; `log(nodes+1)`'s from ≈0.8 to ≈0.3–0.5). Both are consistent with a prognostic effect that's strong early and fades with time — plausible if the tumour burden captured by size/nodes governs early recurrence risk, while later events are driven more by unrelated causes.
+- **`grade` (p = 0.027) — real violation.** Beta(t) drifts from ≈1 down toward ≈−0.5 over follow-up, a shift of comparable magnitude to the two above, not just a large-n artefact of a near-zero trend.
+- **`age` (p = 1×10⁻⁴) — looks trivial on the plot, is not trivial once quantified.** The raw Beta(t) plot for age barely moves (roughly 0 to 0.06), which reads as negligible at a glance. But `age` spans 24–90 in this cohort (IQR 45–65), so even a small per-year drift compounds. Fitting a spline through the scaled Schoenfeld residuals and converting to a per-year hazard ratio at different follow-up times:
+
+```{r age-zph-quantify}
+age_smooth <- zph$y[, "age"]
+sp <- smooth.spline(zph$time, age_smooth, df = 4)
+pred_times <- c(0.5, 1, 2, 4, 6, 8, 10, 12, 14)
+beta_t <- coef(cox_fit)["age"] + predict(sp, x = pred_times)$y
+
+data.frame(
+  follow_up_years   = pred_times,
+  HR_per_year_of_age = round(exp(beta_t), 3)
+)
+```
+
+  The per-year age hazard ratio drifts from about 0.98 early in follow-up to about 1.05 by year 14. For two patients 10 years apart in age, that compounds to the older patient having roughly **18% lower** hazard early on (0.98¹⁰) versus roughly **68% higher** hazard by year 14 (1.05¹⁰) — a real reversal, not noise. It's also biologically plausible rather than an artefact: younger breast cancer patients tend toward more aggressive tumour biology and higher early recurrence risk, while older patients accumulate age-related and competing-cause mortality risk that comes to dominate later in follow-up. A single time-fixed age coefficient averages over a hazard that genuinely changes direction.
+- **`meno` (p = 0.085), `hormon` (p = 0.368), `chemo` (p = 0.952) — no meaningful violation.** Flat Beta(t) in all three plots.
+
+**Conclusion: four covariates violate proportional hazards in a way that matters — `age`, `size`, `log(nodes+1)`, and `grade` — not just `nodes` alone as might be expected going in.** `meno`, `hormon`, and `chemo` satisfy PH. Step 6 addresses the four violators; a model that reports single time-fixed hazard ratios for `age`, `size`, `log(nodes+1)`, and `grade` without acknowledging this would be overstating what the data support.
+
+# Handling any PH violation
+
+Two standard fixes exist for a PH violation: stratification (fit a separate baseline hazard per level of the offending variable, at the cost of losing its hazard ratio entirely) and time-varying coefficients (keep a hazard ratio, but let it be a function of follow-up time). Stratification isn't a good fit here: `size` and `grade` are exactly the variables this analysis needs a reported, documented hazard ratio for, and `age`/`log(nodes+1)` are continuous, so stratifying them would mean discretising them first — an arbitrary binning decision solely to satisfy PH, not something the data demands. Time-varying coefficients are used instead for all four violators (`age`, `size`, `log(nodes+1)`, `grade`), keeping an interpretable — if time-dependent — hazard ratio for each.
+
+`coxph`'s `tt()` mechanism implements this: each covariate wrapped in `tt()` gets a covariate-by-time interaction term with its own coefficient, so its hazard ratio can change over follow-up instead of staying fixed. Because the time interaction multiplies each covariate by time, `size` and `grade` are recoded as explicit 0/1 dummy variables first (`size_20_50`, `size_gt50`, `grade3`) rather than left as factors.
+
+The interaction itself also needs a functional form. Two candidates were compared by AIC: linear-in-time (`x * t`) and log-time (`x * log(t)`, the classical Cox-Schoenfeld choice). Linear-in-time fit better, so that's what's used:
+
+```{r cox-tt-fit}
+rotterdam <- rotterdam %>%
+  mutate(
+    size_20_50 = as.numeric(size == "20-50"),
+    size_gt50  = as.numeric(size == ">50"),
+    grade3     = as.numeric(grade == "Grade 3")
+  )
+
+cox_fit_tv <- coxph(
+  Surv(rfstime_yrs, rfs_event) ~
+    age + tt(age) +
+    meno +
+    size_20_50 + tt(size_20_50) +
+    size_gt50  + tt(size_gt50) +
+    log_nodes1 + tt(log_nodes1) +
+    grade3     + tt(grade3) +
+    hormon + chemo,
+  data = rotterdam,
+  tt = function(x, t, ...) x * t
+)
+
+# Log-time alternative, fit only for the AIC comparison below — not used elsewhere.
+cox_fit_tv_logtime <- coxph(
+  Surv(rfstime_yrs, rfs_event) ~
+    age + tt(age) +
+    meno +
+    size_20_50 + tt(size_20_50) +
+    size_gt50  + tt(size_gt50) +
+    log_nodes1 + tt(log_nodes1) +
+    grade3     + tt(grade3) +
+    hormon + chemo,
+  data = rotterdam,
+  tt = function(x, t, ...) x * log(t)
+)
+
+data.frame(
+  specification = c("Linear-in-time (x*t)", "Log-time (x*log(t))", "Time-fixed (Step 4)"),
+  AIC = c(AIC(cox_fit_tv), AIC(cox_fit_tv_logtime), AIC(cox_fit))
+)
+
+summary(cox_fit_tv)
+```
+
+To check whether the added complexity is actually warranted rather than overfitting noise, a nested likelihood ratio test compares this model against the Step-4-equivalent flat model (same covariates, no `tt()` terms):
+
+```{r cox-tt-lrt}
+cox_fit_flat <- coxph(
+  Surv(rfstime_yrs, rfs_event) ~ age + meno + size_20_50 + size_gt50 + log_nodes1 + grade3 + hormon + chemo,
+  data = rotterdam
+)
+
+lrt_stat <- 2 * (cox_fit_tv$loglik[2] - cox_fit_flat$loglik[2])
+lrt_df   <- length(coef(cox_fit_tv)) - length(coef(cox_fit_flat))
+lrt_p    <- pchisq(lrt_stat, df = lrt_df, lower.tail = FALSE)
+
+data.frame(lrt_stat, lrt_df, lrt_p)
+```
+
+Because a hazard ratio is now a function of time for four covariates, there's no single number to report for them — so hazard ratios are tabulated at 1, 5, and 10 years of follow-up instead:
+
+```{r cox-tt-table}
+b <- coef(cox_fit_tv)
+time_pts <- c(1, 5, 10)
+
+data.frame(
+  follow_up_years = time_pts,
+  age_HR          = round(exp(b["age"]        + b["tt(age)"]        * time_pts), 3),
+  size_20_50_HR   = round(exp(b["size_20_50"] + b["tt(size_20_50)"] * time_pts), 3),
+  size_gt50_HR    = round(exp(b["size_gt50"]  + b["tt(size_gt50)"]  * time_pts), 3),
+  log_nodes1_HR   = round(exp(b["log_nodes1"] + b["tt(log_nodes1)"] * time_pts), 3),
+  grade3_HR       = round(exp(b["grade3"]     + b["tt(grade3)"]     * time_pts), 3)
+)
+```
+
+The nested LRT is strongly significant (χ² = 62.3, df = 5, p = 4.0×10⁻¹²): the five added time-interaction terms improve fit far more than chance would predict. That supports the Step 5 conclusion that these variables' time-fixed hazard ratios were genuinely misspecified, not just flagged by an overly sensitive test.
+
+Reading the fitted hazard ratios at 1 / 5 / 10 years:
+
+- **`age`**: HR 0.990 → 1.007 → 1.027. Matches the Step 5 finding — near-neutral early, mildly elevated risk per year of age by 10 years.
+- **`size` (20–50mm vs. ≤20mm)**: HR 1.517 → 1.246 → 0.974. **`size` (>50mm vs. ≤20mm)**: HR 1.948 → 1.380 → 0.898. Larger tumours carry a substantial *early* recurrence risk that fades and, by 10 years, is no longer distinguishable from (or is even slightly below) the smallest-tumour group.
+- **`log(nodes+1)`**: HR 1.883 → 1.653 → 1.405. The largest effect throughout follow-up, but its magnitude nearly halves in log-HR terms from year 1 to year 10 — nodal burden dominates early risk and matters somewhat less, though still substantially, later on.
+- **`grade3` (vs. grade 2)**: HR 1.530 → 1.355 → 1.164, a similar-looking decline to the others, but **its own `tt()` interaction term did not reach conventional significance on its own (p = 0.12)**, unlike `age`, `size` (both dummies), and `log(nodes+1)` (all p < 0.01). The joint LRT above supports keeping the time-varying specification for the model as a whole, but grade's individual time-trend should be read with more caution than the other three — the data are consistent with a fading effect, but don't pin it down as precisely.
+
+**What this costs.** Four of the eight predictors no longer have a single hazard ratio — reporting them now requires picking a follow-up horizon (or several, as above), harder to communicate than one number. Discrimination barely moves (concordance 0.680 → 0.683): this fix is about correctly specifying *what the hazard ratios are*, not about improving predictive power. For `grade3` specifically, the fix is only partially justified on its own terms — it's included because the global test and the Step 5 diagnostic supported it, not because its individual time-interaction coefficient clears significance by itself.
+
+# Model validation
+
+Steps 1–6 built and diagnosed a model. This section asks a different question: how good is it, and how would that assessment mislead if taken at face value?
+
+Apparent performance is optimistic — every concordance figure reported so far (Step 4: 0.68, Step 6: 0.683) was calculated on the same `rotterdam` data used to fit the model, so the model gets partial credit for fitting its own noise. Section 7.1 corrects for this. (The 0.683 figure is `summary(cox_fit_tv)`'s own internal fit-time calculation, distinct from calling the standalone `concordance()` function afterward — which does not support `tt()` terms, and this is the reason why matters throughout the rest of this section.) A single global concordance also collapses discrimination at every follow-up horizon into one number; Section 7.2 breaks that down by time.
+
+**Most importantly, Step 6's time-varying model cannot be evaluated by any of R's standard validation tools — this was confirmed directly, not assumed.** `concordance()` fails on a `coxph` object with `tt()` terms (`"cannot yet handle models with tt terms"`). `survfit()` and `basehaz()` fail the same way, which also blocks calibration and Brier score since both need a baseline hazard. `pec::pec()` confirms the same limitation independently. And `predict(cox_fit_tv, newdata = ..., type = "lp")` doesn't error, but forcing different follow-up times into `newdata` produces an *identical* linear predictor every time — it silently ignores the time-varying terms rather than evaluating them. Using that output would have meant quietly validating a model that behaves like the flat Step 4 model while presenting it as Step 6's finding.
+
+The approach used throughout this section: anything requiring a baseline hazard (calibration, Brier score, prediction error) is validated on a flat model equivalent to Step 4 — refit here as `dev_fit`, without `chemo` so it matches the model used for external validation in Step 8. For discrimination, the time-varying model's own definition provides a way through instead: at any time t, its fitted log-hazard contribution is exactly `β_fixed·x + β_tt·x·t` — not an approximation of the Step 6 model, but the Step 6 model evaluated at t. Section 7.2 uses this to assess the actual final model's time-dependent discrimination.
+
+```{r dev-fit-refit}
+# dev_fit: the flat model used for all of Section 7's baseline-hazard-dependent validation,
+# and reused unchanged in Step 8's external validation. Excludes chemo (see Step 8) and is
+# otherwise identical to Step 4's cox_fit. x = TRUE, y = TRUE store the design matrix and
+# response inside the fitted object, which pec() and Score() below require.
+# (This is not the same object as cox_fit_flat in Step 6, which includes chemo and is used
+# only for that section's likelihood-ratio comparison.)
+dev_fit <- coxph(
+  Surv(rfstime_yrs, rfs_event) ~ age + meno + size_20_50 + size_gt50 + log_nodes1 + grade3 + hormon,
+  data = rotterdam, x = TRUE, y = TRUE
+)
+concordance(dev_fit)
+```
+
+Apparent concordance for `dev_fit` (0.674) is close to Step 4's full model with `chemo` included (0.680) — dropping `chemo` costs almost nothing in discrimination, which matters because `chemo` has to be dropped for external validation regardless (Step 8).
+
+## Internal validation: bootstrap optimism correction
+
+**Why this matters**: a model's concordance on its own training data is a biased estimate of how it will perform on new data, because the model's coefficients were chosen specifically to fit that data well. The gap between the two is called optimism. The procedure below follows the logic Harrell describes for bootstrap optimism correction: refit the model on B bootstrap resamples, and for each one compare its concordance on the resample itself (which mimics apparent performance) against its concordance on the original data (which mimics performance on unseen data). The average gap across resamples is the estimated optimism, subtracted from the apparent concordance to get an optimism-corrected estimate. This is a plain implementation using `coxph()` and `survival::concordance()` directly, not the `rms` package's `validate()` function — the procedure is the same idea, but this isn't a claim that the numbers below reproduce `rms::validate()` output exactly.
+
+```{r bootstrap-optimism}
+form <- Surv(rfstime_yrs, rfs_event) ~ age + meno + size_20_50 + size_gt50 + log_nodes1 + grade3 + hormon
+apparent_c <- concordance(dev_fit)$concordance
+
+B <- 200
+optimism <- numeric(B)
+for (b in 1:B) {
+  idx       <- sample(nrow(rotterdam), nrow(rotterdam), replace = TRUE)
+  boot_data <- rotterdam[idx, ]
+  fit_b     <- coxph(form, data = boot_data)
+  c_boot_boot <- concordance(fit_b)$concordance                    # apparent, on its own resample
+  c_boot_orig <- concordance(fit_b, newdata = rotterdam)$concordance # tested on the original data
+  optimism[b] <- c_boot_boot - c_boot_orig
+}
+
+mean_optimism <- mean(optimism)
+corrected_c   <- apparent_c - mean_optimism
+
+data.frame(
+  apparent_C            = round(apparent_c, 4),
+  mean_optimism         = round(mean_optimism, 4),
+  optimism_corrected_C  = round(corrected_c, 4)
+)
+```
+
+Apparent concordance is 0.6737; the estimated optimism is 0.0013 — essentially none; optimism-corrected concordance is 0.6725. This isn't a given result: with n = 2982 and only 7 predictors, there's little room for the model to overfit its training data, and the bootstrap checks that directly instead of assuming it. Apparent and optimism-corrected performance are close enough that the distinction here matters more as a demonstrated check than as a large correction.
+
+**Limitation**: this bootstrap validates `dev_fit`, not the Step 6 time-varying model — `concordance()` cannot evaluate the latter (see above), so there is no equivalent optimism-corrected figure for it in this analysis.
+
+## Time-dependent discrimination
+
+A single concordance value averages discrimination across all of follow-up. Time-dependent AUC instead asks, at a specific horizon t: among patients who had the event by t and patients who didn't, how well does the model's risk score separate them?
+
+**These two models are assessed with different tools, so the results below are not two instances of the same calculation.** `dev_fit` uses `riskRegression::Score()` end to end — a single validated function, one fixed risk score per patient. No equivalent tool exists for the time-varying model (Section 7). Instead, a **landmark time-specific AUC** is built by hand: at each horizon t, a risk score is computed directly from the fitted coefficients (`β_fixed·x + β_tt·x·t`) and passed to `timeROC::timeROC()`. The score's variable names, transformations, and reference levels were checked term-by-term against `names(coef(cox_fit_tv))` to make sure it matches the fitted model exactly. It is labelled **apparent (in-sample)** below — evaluated on the data the model was fit to, with no bootstrap or external correction attempted.
+
+```{r time-dep-auc-flat}
+sc_flat <- Score(
+  list("Cox" = dev_fit),
+  formula = Surv(rfstime_yrs, rfs_event) ~ 1,
+  data = rotterdam,
+  times = c(1, 5, 10),
+  metrics = c("auc", "brier"),
+  summary = "ibs"
+)
+sc_flat$AUC$score
+```
+
+```{r time-dep-auc-tv}
+# The Step 6 model's fitted log-hazard contribution at time t is beta_fixed*x + beta_tt*x*t —
+# this IS the model, evaluated at t, not an approximation of it. Used here only to build a
+# per-patient risk score at each landmark time, for input to timeROC's AUC(t) calculation.
+b_tv <- coef(cox_fit_tv)
+# sanity check: the terms referenced below must exactly match the fitted model's own
+# coefficient names, or this whole calculation would silently score the wrong model.
+stopifnot(setequal(
+  names(b_tv),
+  c("age","tt(age)","menoPostmenopausal","size_20_50","tt(size_20_50)",
+    "size_gt50","tt(size_gt50)","log_nodes1","tt(log_nodes1)",
+    "grade3","tt(grade3)","hormonYes","chemoYes")
+))
+
+landmark_score <- function(data, t) {
+  with(data, {
+    age * b_tv["age"] + age * t * b_tv["tt(age)"] +
+      ifelse(meno == "Postmenopausal", 1, 0) * b_tv["menoPostmenopausal"] +
+      size_20_50 * b_tv["size_20_50"] + size_20_50 * t * b_tv["tt(size_20_50)"] +
+      size_gt50  * b_tv["size_gt50"]  + size_gt50  * t * b_tv["tt(size_gt50)"] +
+      log_nodes1 * b_tv["log_nodes1"] + log_nodes1 * t * b_tv["tt(log_nodes1)"] +
+      grade3     * b_tv["grade3"]     + grade3     * t * b_tv["tt(grade3)"] +
+      ifelse(hormon == "Yes", 1, 0) * b_tv["hormonYes"] +
+      ifelse(chemo  == "Yes", 1, 0) * b_tv["chemoYes"]
+  })
+}
+
+tv_auc <- sapply(c(1, 5, 10), function(t_) {
+  score_t <- landmark_score(rotterdam, t_)
+  roc_t <- timeROC(T = rotterdam$rfstime_yrs, delta = rotterdam$rfs_event, marker = score_t,
+                    cause = 1, times = t_, iid = FALSE)
+  roc_t$AUC[2]
+})
+
+data.frame(
+  follow_up_years = c(1, 5, 10),
+  `Flat model - apparent AUC (Score)`                     = round(sc_flat$AUC$score$AUC, 3),
+  `Time-varying model - landmark AUC (apparent, in-sample)` = round(tv_auc, 3),
+  check.names = FALSE
+)
+```
+
+Both models discriminate best early and worst late, but not in the same way, and the comparison above is between a fully validated flat-model AUC and a hand-built landmark AUC for the time-varying model — not two instances of the same calculation. The flat model is fairly stable across horizons (75.2% → 71.8% → 69.8%). The time-varying model's landmark AUC is **higher** at 1 year (76.4%), **similar** at 5 years (71.9%), and **lower** at 10 years (63.0%) than the flat model's. This 10-year decline is not hidden or explained away: one plausible reason is that the linear-in-time interaction (`x * t`, chosen by AIC in Step 6) extrapolates each covariate's declining effect in a straight line, and by year 10 that straight-line extrapolation may have overshot — pushing some coefficients toward smaller or reversed values rather than genuinely tracking how risk behaves that far out. That's a plausible explanation, not a proven one; nothing here or in Step 6 formally tests it. What this does **not** show is that the time-varying model is worse overall — it was fit because Step 5's PH violations were real, not to maximize AUC, and its 1-year advantage is consistent with the effects Step 6 found to be strongest early in follow-up.
+
+## Calibration
+
+Discrimination (Section 7.2) asks whether the model *ranks* patients correctly. Calibration asks a different question: when the model predicts a 40% probability of an event by year 5, do roughly 40% of such patients actually experience one? A model can discriminate well while being poorly calibrated, or vice versa — they are not substitutes for each other.
+
+```{r calibration-plot, fig.width=7, fig.height=6, fig.cap="Calibration at 5 years — flat model, development cohort (rotterdam)"}
+calPlot(list("Cox" = dev_fit), time = 5, data = rotterdam,
+        formula = Surv(rfstime_yrs, rfs_event) ~ 1,
+        main = "Calibration at 5 years")
+```
+
+```{r calibration-plot-10y, fig.width=7, fig.height=6, fig.cap="Calibration at 10 years — flat model, development cohort (rotterdam)"}
+calPlot(list("Cox" = dev_fit), time = 10, data = rotterdam,
+        formula = Surv(rfstime_yrs, rfs_event) ~ 1,
+        main = "Calibration at 10 years")
+```
+
+Both axes here are predicted *survival* probability, not risk — a curve on the diagonal means predicted and observed survival agree. At 5 years, the fitted curve sits slightly below the diagonal through the 20–60% predicted-survival range (observed survival running a little lower than predicted) and wobbles — dipping, then jumping back up — around 60–75% predicted survival, before closing back toward the diagonal at the top. At 10 years, the pattern flips at the low end: the curve sits slightly *above* the diagonal below ~20% predicted survival (observed survival a little higher than predicted for the highest-risk patients) and shows a similar mid-range wobble around 50–60%. Neither deviation is large, and the wobbly regions are exactly where the curve is estimated from fewer patients — but this is mild-to-reasonable calibration with a couple of localized soft spots, not a demonstration of excellent calibration across the board, and it shouldn't be described as more than that.
+
+```{r calibration-slope}
+lp_flat   <- predict(dev_fit, type = "lp")
+recal_fit <- coxph(Surv(rfstime_yrs, rfs_event) ~ lp_flat, data = rotterdam)
+data.frame(
+  `Apparent calibration slope (development data)` = round(coef(recal_fit), 3),
+  se = round(sqrt(vcov(recal_fit)[1, 1]), 3),
+  check.names = FALSE
+)
+```
+
+The calibration slope — refit the model's own linear predictor as a single covariate in a new Cox model and check whether its coefficient is 1 — comes out to 1.00. This is close to tautological: a Cox model's linear predictor is, by construction, calibrated to the exact data it was fit to, so this number mostly confirms the fitting procedure worked rather than testing anything external to it. It should not be read as "the model is well calibrated." The plots above are a more informative internal check, and the external calibration slope in Step 8 — calculated on `gbsg`, not guaranteed to equal 1 — is the real test.
+
+## Prediction error: Brier score and integrated Brier score
+
+The Brier score is the mean squared difference between predicted event probability and observed outcome at a given time, using IPCW to handle censoring — unlike AUC, it penalizes miscalibration as well as poor discrimination, so it's a complementary check rather than a repeat of Section 7.2 in different units. Lower is better; a "null model" using only the marginal Kaplan-Meier curve (no covariates) is the reference point for whether the Cox model adds anything. Like the calibration slope above, these are apparent (in-sample) measures calculated in the development cohort; no bootstrap optimism correction was applied to the Brier score or IBS.
+
+```{r brier-score}
+sc_flat$Brier$score
+```
+
+The Cox model beats the null model at every horizon (e.g., at 5 years: 20.7% vs. 24.5%), which is consistent with the covariates adding real predictive information beyond the marginal survival curve — a different angle on the same question the AUC and calibration results above address, not a repeat of them.
+
+```{r ibs}
+p_ibs <- pec(list("Cox" = dev_fit), formula = Surv(rfstime_yrs, rfs_event) ~ 1,
+             data = rotterdam, times = c(1, 5, 10), splitMethod = "none")
+p_ibs
+```
+
+The integrated Brier score (IBS) — prediction error averaged over the entire follow-up period rather than at single horizons — is 0.179 for the Cox model versus 0.205 for the null model, a single-number summary consistent with the per-horizon results above.
+
+Not computed for the time-varying model, for the same reason as calibration: Brier score needs the baseline hazard that `pec()`/`survfit()`/`basehaz()` cannot produce for a `tt()` model (Section 7).
+
+# External validation on gbsg
+
+Two checks before touching harmonization code. First, `gbsg` and `rotterdam` share a large number of `pid` values (682 of 686) — worth ruling out that this is patient overlap rather than a coincidence, since a shared-patient "external" validation would be circular. Comparing `age`, `meno`, and `nodes` for the overlapping IDs across the two datasets: `age` matches on only 21/682 rows (~3%, chance level for a 24–90 range), `meno` matches at ~50% (chance level for a binary variable). `pid` is a per-dataset row index, not a stable cross-study patient identifier — `gbsg` is a genuinely independent cohort.
+
+Second, a real case-mix difference: every patient in `gbsg` has `nodes >= 1`. This isn't a data error — GBSG-2, the trial `gbsg` is drawn from, enrolled node-positive patients only, unlike `rotterdam` (57% node-negative). Validating on `gbsg` therefore tests the model on a systematically higher-risk subgroup, not "the same population elsewhere." This limits how far the validation result generalizes and is stated again in the results below, not just here.
+
+**Harmonization decisions**, each applied to both cohorts identically:
+
+- `size`: `gbsg` records continuous tumour size in mm; `rotterdam` uses `<=20 / 20-50 / >50` mm categories. `gbsg` is binned into the same three categories using rotterdam's cutpoints.
+- `grade`: `gbsg` has three levels (1/2/3); `rotterdam`'s "grade 2" already represents the original study's collapsed grade 1–2 category (Step 2). Both cohorts use the same `grade3` (grade 3 vs. not) dummy for consistency, so `gbsg` grade 1 and 2 collapse together the same way.
+- `chemo` does not exist in `gbsg` and cannot be harmonized — it's dropped from the model used for validation (see below).
+- `gbsg` ships its own pre-built `rfstime`/`status` columns; there are no separate recurrence/death columns to rebuild the Step 1 derivation from, so these are used directly as the RFS endpoint (converted to years) rather than re-derived.
+
+**Model used for validation.** For the same reason as Section 7 — standard tools can't evaluate a `tt()` model — `dev_fit`, the flat model already validated internally, is used here too. It also excludes `chemo` (unavailable in `gbsg`), so the development and validation models use an identical, fully-available predictor set. `gbsg` is harmonized to match:
+
+```{r validation-harmonize}
+gbsg <- gbsg %>%
+  mutate(
+    rfstime_yrs = rfstime / 365.25,
+    rfs_event   = status,
+    meno        = factor(meno,   levels = c(0, 1), labels = c("Premenopausal", "Postmenopausal")),
+    hormon      = factor(hormon, levels = c(0, 1), labels = c("No", "Yes")),
+    log_nodes1  = log(nodes + 1),
+    size_20_50  = as.numeric(size > 20 & size <= 50),
+    size_gt50   = as.numeric(size > 50),
+    grade3      = as.numeric(grade == 3)
+  )
+```
+
+```{r validation-concordance}
+# concordance() on a fitted coxph object, given newdata, scores that data with the
+# *frozen* development-cohort coefficients and reports Harrell's C on the new data —
+# this is what makes it an external validation rather than a refit.
+cat("Internal (apparent) concordance, rotterdam:\n")
+print(concordance(dev_fit))
+
+cat("\nExternal concordance, gbsg:\n")
+print(concordance(dev_fit, newdata = gbsg))
+```
+
+Internal concordance (on the data the model was fit to) is 0.674 (se 0.007). External concordance on `gbsg` is 0.664 (se 0.016) — a small drop (~0.01), which suggests the model's discrimination transports reasonably well to `gbsg`. But given the node-positive-only case mix documented above, this should be read as "holds up on a higher-risk subgroup," not "holds up on an independent general population" — the two cohorts differ by more than just being different hospitals, and the C-index alone doesn't capture that.
+
+## Beyond concordance: external time-dependent AUC, Brier score, and calibration
+
+The same tools from Section 7 extend to `gbsg`, a stronger check than the bootstrap since it's genuine external data rather than a resampled version of the training set. `gbsg`'s maximum follow-up is 7.28 years, so the 10-year horizon used elsewhere in this analysis **cannot be estimated externally** — there's no data to estimate it from. Only 1- and 5-year horizons are used here.
+
+```{r validation-score}
+sc_ext <- Score(
+  list("Cox" = dev_fit),
+  formula = Surv(rfstime_yrs, rfs_event) ~ 1,
+  data = gbsg,
+  times = c(1, 5),
+  metrics = c("auc", "brier")
+)
+sc_ext$AUC$score
+sc_ext$Brier$score
+```
+
+External time-dependent AUC is 73.3% (95% CI 66.8–79.9) at 1 year and 71.2% (65.9–76.5) at 5 years — close to the internal apparent values from Step 7 (75.2%, 71.8%), and within each other's confidence intervals. External Brier score is 7.4% at 1 year and 21.7% at 5 years, both below the null (no-covariate) model's 7.7% and 25.0% — the model still beats an uninformative baseline on external data it wasn't fit to.
+
+```{r validation-calibration-slope}
+lp_ext    <- predict(dev_fit, newdata = gbsg, type = "lp")
+recal_ext <- coxph(Surv(rfstime_yrs, rfs_event) ~ lp_ext, data = gbsg)
+data.frame(
+  `External calibration slope (gbsg, independent data)` = round(coef(recal_ext), 3),
+  se = round(sqrt(vcov(recal_ext)[1, 1]), 3),
+  check.names = FALSE
+)
+```
+
+Unlike the internal slope in Step 7, this one is calculated on data the model was never fit to, so it's a genuine calibration test rather than a near-tautology. The external calibration slope is 1.13 (se 0.12) — close to the ideal value of 1, and within roughly one standard error of it, though the wide interval (n = 686, and fewer patients still at the horizons used for calibration) means this shouldn't be oversold as a precise estimate. A slope above 1 would, if it held up with more data, suggest the model's risk gradient is slightly too *conservative* for `gbsg` — predictions could be spread a little further apart and still track outcomes — but with this much uncertainty the honest read is "consistent with reasonable calibration," not "well calibrated" or "confirmed."
+
+Discrimination and prediction error both transport reasonably well from `rotterdam` to `gbsg` at the horizons `gbsg`'s follow-up supports. But this is validation of the flat model on a node-positive-only subgroup with limited follow-up — not evidence that the Step 6 time-varying model, or the 10-year horizon used elsewhere in this analysis, generalizes to an external population.
+
+# RMST by treatment group
+
+Restricted mean survival time (RMST) at a horizon τ is the area under the Kaplan-Meier curve up to τ — the expected number of recurrence-free years a patient experiences within that window, rather than a hazard ratio's relative-risk summary. It's reported here in the same units the audience actually cares about: life-years within a stated horizon, not an abstract rate ratio. τ = 10 years is used, chosen for clinical relevance and because both `hormon` groups have follow-up well past 10 years (max 19.3 and 17.2 years respectively), so no group is truncated by insufficient follow-up at this horizon.
+
+This uses the `hormon` grouping, the same variable Steps 3, 4 and 6 already built a confounding-by-indication story around — deliberately, so the RMST result can be read against that established context rather than in isolation.
+
+```{r rmst}
+# rmst2() needs a numeric 0/1 arm indicator; hormon is a labelled factor (Step 2).
+rmst_result <- rmst2(
+  time   = rotterdam$rfstime_yrs,
+  status = rotterdam$rfs_event,
+  arm    = as.integer(rotterdam$hormon == "Yes"),  # 1 = hormonal therapy, 0 = none
+  tau    = 10
+)
+rmst_result
+```
+
+Within a 10-year horizon, patients who received hormonal therapy have an RMST of 5.49 years (se 0.21) versus 6.26 years (se 0.07) for those who did not — a difference of **−0.77 years (95% CI −1.20 to −0.34, p < 0.001)**. Read at face value, this says hormonal therapy is associated with 0.77 fewer recurrence-free life-years over 10 years.
+
+**This is the naive, unadjusted comparison, and it carries the same confounding-by-indication caveat as the Step 3 Kaplan-Meier curves — restated here because a "life-years" number is exactly the kind of result most likely to get quoted without its caveat attached.** `hormon` was not randomly assigned; Step 4's adjusted Cox model showed the direction reverses once age, size, nodes, and grade are accounted for (HR 0.68). `rmst2()` compares the two arms' unadjusted KM curves directly — an adjusted RMST (e.g. via covariate-standardized survival curves) would be needed for a defensible "life-years gained from treatment" claim, which this analysis does not attempt. What it does show is consistent, in direction, with the unadjusted KM difference already reported in Step 3.
+
+# Competing-risk sensitivity analysis
+
+**Is a competing-risk analysis appropriate here?** The primary endpoint (Step 1) already incorporates death as an RFS event, combining recurrence and death into a single "whichever comes first" outcome. The classical motivation for competing-risk methods — an analysis of recurrence alone that silently treats death as non-informative censoring, inflating the apparent recurrence rate for patients who could no longer be observed to recur — doesn't apply to the primary analysis; it was designed around exactly this issue from Step 1 onward.
+
+What the composite endpoint can't show is whether a covariate's association looks the same for its two components. A hazard ratio for `hormon` on the composite outcome could reflect an association with recurrence, with death, or both. **This section adds a decomposition, not a replacement.** The component-specific associations are examined here to see whether the composite RFS association is consistent across the recurrence and death components — not to establish which component the composite result "comes from" or "is driven by," which is a stronger claim than a cause-specific hazard comparison supports.
+
+Cause-specific (not Fine-Gray subdistribution) hazards are used deliberately. Fine-Gray models estimate a covariate's effect on the *absolute, population-level* cumulative incidence of one event type when a competing event can preclude it — the right tool for an absolute-risk-prediction question. This analysis has been a risk-factor/prognostic study throughout (Section "Purpose and scope"), and cause-specific hazards is the natural extension of the Cox models already used everywhere else in this document.
+
+**Constructing the two event times — this needs the same care as Step 1, not a shortcut.** A cause-specific hazard model for recurrence needs: recurrence as the event of interest, death before recurrence treated as a competing event (censored at the time it occurs, not ignored), and patients with neither event censored at their last follow-up. A model built carelessly here would use `rtime` as the recurrence time for every patient — but Step 1 already showed that's wrong for 43 patients who died without a recorded recurrence: `rtime` for them is the date of their *last disease-free exam*, not their death date, and is earlier than their actual death (`dtime`) by a median of ~520 days. Using `rtime` for these patients would censor them at that earlier exam date, understating how long they were actually followed and known to be recurrence-free.
+
+The fix is to reuse Step 1's `rfstime_yrs`, which already resolves this correctly, and just swap which event counts:
+
+- **Recurrence-specific model**: event = `recur`, time = `rfstime_yrs`. For patients with `recur == 1`, `rfstime_yrs` is `rtime` — the recurrence time, correct. For patients with `recur == 0` (whether or not they later died), `rfstime_yrs` is `dtime` — so a patient who died without recorded recurrence is censored for the recurrence endpoint at their actual death date, which is the standard way to handle a competing event (still counted as at risk and recurrence-free up to that point) and is exactly how Step 1 already treated this same group.
+- **Death-specific model**: event = `death`, time = `dtime` directly. `dtime` is unambiguous for every patient, so this model doesn't need the same routing.
+
+```{r competing-risks}
+rotterdam <- rotterdam %>%
+  mutate(death_time_yrs = dtime / 365.25)
+
+# Recurrence-specific: time = rfstime_yrs (Step 1's endpoint, already handles the
+# rtime/dtime issue correctly), event = recur only. Death before recurrence is a
+# competing event and is censored here, not counted as a recurrence.
+cs_recur <- coxph(
+  Surv(rfstime_yrs, recur) ~ age + meno + size_20_50 + size_gt50 + log_nodes1 + grade3 + hormon + chemo,
+  data = rotterdam
+)
+
+# Death-specific (any cause): dtime is unambiguous, no routing needed.
+cs_death <- coxph(
+  Surv(death_time_yrs, death) ~ age + meno + size_20_50 + size_gt50 + log_nodes1 + grade3 + hormon + chemo,
+  data = rotterdam
+)
+
+cat("Recurrence-specific: events =", sum(rotterdam$recur), " censored =", sum(rotterdam$recur == 0), "\n")
+cat("Death-specific: events =", sum(rotterdam$death), " censored =", sum(rotterdam$death == 0), "\n")
+
+recur_HR <- exp(coef(cs_recur))
+death_HR <- exp(coef(cs_death))
+# dev_fit (Step 7) doesn't include chemo (dropped for external validation), so its HR is NA
+# for that term here rather than fitting yet another model just for this comparison column.
+composite_HR <- exp(coef(dev_fit))[names(coef(cs_recur))]
+
+data.frame(
+  term             = names(coef(cs_recur)),
+  recurrence_HR    = round(recur_HR, 3),
+  death_HR         = round(death_HR, 3),
+  composite_RFS_HR = round(composite_HR, 3)
+)
+```
+
+(`composite_RFS_HR` above is `dev_fit`'s hazard ratios, Step 7 — `chemo` isn't in `dev_fit` since it's dropped for external validation, hence the `NA` for that row.)
+
+Recurrence-specific: 1518 events, 1464 censored. Death-specific: 1272 events, 1710 censored (both add to 2982, the full cohort — no patients dropped).
+
+`hormon` is associated with lower hazard in both components — recurrence-specific HR 0.694, death-specific HR 0.750 — in the same direction as the composite estimate (0.679 with chemo in Step 4, 0.716 without chemo in `dev_fit`). `log(nodes+1)` shows the same pattern: recurrence-specific HR 1.829, death-specific HR 1.768, both large and in the same direction as the composite estimate. Both variables' component-specific associations are consistent with the composite RFS association; this doesn't rule out one component contributing more than the other in ways a hazard ratio comparison can't detect, but there's no sign here of the two components pulling in different directions.
+
+As a check on how much the `rtime`/`dtime` fix actually mattered: refitting the recurrence-specific model the wrong way (`rtime` for every patient, the Step 1 pitfall) gives a `hormon` HR of 0.693 instead of 0.694 — a negligible difference, because only 43 of 2982 patients are affected. The correct construction is used regardless, since the reason for using it is that it's the defensible one, not that it changes the answer.
+
+**Limitation of this sensitivity analysis**: cause-specific hazards describe the *rate* of each event type among patients still at risk of it, not the *absolute probability* of each event type in the presence of the other — a Fine-Gray model would be needed for that, and was deliberately not fit here (see above). This section checks whether `hormon`'s and `log(nodes+1)`'s associations look consistent across the two components of RFS. It does not quantify how much of the composite hazard ratio "comes from" each component, and shouldn't be read as doing so.
+
+# Final Model Performance Summary
+
+The flat model (`dev_fit`) and the time-varying model (`cox_fit_tv`) were assessed with different tools for the reasons explained in Section 7, so their results are kept in separate tables rather than one list where the method behind each number could get lost. Every entry below traces to a specific chunk earlier in this document — nothing here is a new calculation.
+
+**Flat model — development and internal validation** (all on `rotterdam`, the data it was fit to):
+
+```{r performance-summary-internal}
+# apparent_c and corrected_c come from the Section 7.1 bootstrap chunk, already run earlier
+# in this same knit — pulling them live here means this table can never drift out of sync
+# with what that chunk actually produced, even though the exact bootstrap draw (and so the
+# optimism estimate) depends on the full random-number sequence up to that point.
+knitr::kable(data.frame(
+  Metric = c(
+    "Apparent concordance",
+    "Optimism-corrected concordance (bootstrap, B = 200)",
+    "Apparent time-dependent AUC, 1 / 5 / 10y (Score())",
+    "Apparent calibration slope (development data)",
+    "Apparent Brier score, 1 / 5 / 10y, vs. null model (Score())",
+    "Apparent integrated Brier score (IBS), 0-19.3y, vs. null model (pec())"
+  ),
+  Value = c(
+    paste0(round(apparent_c, 4), " (se 0.007)"),
+    round(corrected_c, 4),
+    "75.2% / 71.8% / 69.8%",
+    "1.00 (near-tautological on training data — see Section 7.3)",
+    "7.5% / 20.7% / 21.2% vs. 8.1% / 24.5% / 23.9%",
+    "0.179 vs. 0.205"
+  )
+))
+```
+
+**Flat model — external validation on gbsg** (independent cohort, node-positive only, follow-up capped at 7.3 years — no 10-year figures exist because `gbsg` doesn't have the follow-up to estimate them):
+
+```{r performance-summary-external}
+knitr::kable(data.frame(
+  Metric = c(
+    "External concordance",
+    "External time-dependent AUC, 1 / 5y (Score())",
+    "External calibration slope",
+    "External Brier score, 1 / 5y, vs. null model (Score())"
+  ),
+  Value = c(
+    "0.664 (se 0.016)",
+    "73.3% / 71.2%",
+    "1.13 (se 0.12)",
+    "7.4% / 21.7% vs. 7.7% / 25.0%"
+  )
+))
+```
+
+**Time-varying model — landmark discrimination only** (apparent/in-sample on `rotterdam`; see Section 7.2 for why nothing else is reported for this model):
+
+```{r performance-summary-tv}
+knitr::kable(data.frame(
+  Metric = "Landmark time-specific AUC, 1 / 5 / 10y (hand-derived score + timeROC, apparent/in-sample)",
+  Value  = "76.4% / 71.9% / 63.0%"
+))
+```
+
+**What's deliberately not in these tables.** No optimism-corrected, calibration, or Brier figure for the time-varying model — those tools can't process `tt()` terms (Section 7). No 10-year figure in the external table — `gbsg`'s follow-up caps at 7.28 years (Section 8). The time-varying model's table has one row because a landmark AUC is the only metric that could be computed for it at all, not because the analysis stopped early.
+
+# Overall interpretation and limitations
+
+**In summary**: this is a prognostic Cox model for recurrence-free survival, developed on `rotterdam`, diagnosed for proportional-hazards violations and refit with time-varying coefficients where those violations were real (Sections 5–6), and validated both internally (Section 7) and externally (Section 8), as far as each model's tooling allowed. `hormon` and `chemo` hazard ratios throughout are adjusted *associations*, not causal treatment effects (Section 3, Section 4); Section 10's cause-specific decomposition adds detail without changing that status.
+
+**On discrimination**: for the flat model, concordance and time-dependent AUC — apparent, optimism-corrected, and external — sit in the high-60s to mid-70s percent range. That's a real but moderate ability to rank patients, not the discrimination that would support using this model for individual patient risk stratification. The time-varying model's landmark AUC (Section 7.2, apparent/in-sample, not the same calculation as the flat model's) is higher at 1 year, similar at 5, and lower at 10 than the flat model's — a real pattern, not an artefact, and no optimism-corrected or external version of it exists.
+
+**On calibration**: the internal calibration slope (Section 7.3) is close to tautological — calculated on the same data the model was fit to — and is labelled as an apparent, development-data figure rather than presented as a genuine calibration test. The external calibration slope (1.13, se 0.12, Section 8) is the real test, since it's calculated on data the model never saw, and it's consistent with reasonable calibration. The uncertainty around it is wide enough that "consistent with" is the right level of confidence — not "well calibrated" or "confirmed."
+
+**On external validity**: every external figure in this analysis (concordance, AUC, Brier, calibration) describes performance on `gbsg` specifically — a node-positive-only trial cohort with a 7.3-year follow-up ceiling, not a general population, and not evidence for the 10-year horizon or the time-varying model used elsewhere in this document. This is restated here because it is the limitation most likely to be silently dropped when this analysis gets summarized.
+
+**On the composite endpoint and competing risks**: Section 10's cause-specific hazards for `hormon` and `log(nodes+1)` point in the same direction as the composite RFS hazard ratios for both components (recurrence and death) checked. That's consistent with the composite association, not a demonstration that one component "drives" it — cause-specific hazards don't support that stronger claim, and Section 10 says so directly. The decomposition used cause-specific hazards because this has been a prognostic/etiological study throughout, not an absolute-risk-prediction one, which is also why a Fine-Gray model wasn't fit.
+
+**What would change this from a portfolio analysis to something usable**: a contemporary cohort (both source cohorts predate current treatment protocols by decades), calibration and discrimination assessed on a cohort that isn't restricted to a single risk subgroup, and — if the goal shifted from prognosis to informing an actual treatment decision — a causally-motivated design for the `hormon`/`chemo` associations rather than adjusted observational hazard ratios. `README.md` covers this in more depth as the primary narrative deliverable; this section exists so the caveats live next to the numbers that need them, not only in a separate document.
+
+# Methodological references {-}
+
+- Cox, D.R. (1972) — the proportional hazards model underlying every Cox fit in this analysis.
+- Grambsch & Therneau (1994) — the scaled Schoenfeld residual test (`cox.zph()`) used in Step 5.
+- Harrell, Lee & Mark (1996) and Harrell (2015) — the bootstrap optimism-correction procedure used in Section 7.1.
+- Uno et al. (2014) — the concordance (C-index) statistic used throughout for discrimination.
+- Blanche, Dartigues & Jacqmin-Gadda (2013) — the time-dependent AUC methodology (`timeROC`) used in Section 7.2.
+- Graf et al. (1999) — the Brier score / integrated Brier score for censored survival data used in Section 7.4.
+- Andersen et al. (2012) — restricted mean survival time (RMST) as an effectiveness summary, used in Step 9.
+- Royston & Altman (2013) — principles for external validation of a Cox prognostic model, which the `rotterdam`/`gbsg` external validation in Section 8 follows.
+
+# Session info {-}
+
+```{r session-info}
+sessionInfo()
+```
