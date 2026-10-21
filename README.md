@@ -24,7 +24,7 @@ This is a methods project on published cohorts, not a validated clinical tool. S
 
 ## 2. Who would use this estimate, and at what point in care
 
-A model like this — hazard ratios for baseline prognostic factors, checked for proportional hazards violations, internally and externally validated — is the kind of analysis a hospital's clinical data or biostatistics team would build to support **prognostic counselling at the point of diagnosis and treatment planning**: after surgery, once pathology (tumour size, grade, nodal status) is known, before adjuvant treatment decisions are finalised. It is not a real-time risk calculator and it is not this analysis's job to be one — the model here is a demonstration of method, fit on data from the 1970s–90s, not a calibrated instrument ready for a 2026 Singaporean patient. Section 9 says explicitly what stands between this and that.
+A model like this — hazard ratios for baseline prognostic factors, checked for proportional hazards violations, internally and externally validated — is the kind of analysis a hospital's clinical data or biostatistics team would build to support **prognostic counselling at the point of diagnosis and treatment planning**: after surgery, once pathology (tumour size, grade, nodal status) is known, before adjuvant treatment decisions are finalised. It is not a real-time risk calculator and it is not this analysis's job to be one — the model here is fit on data from the 1970s–90s and is not a calibrated instrument ready for a 2026 Singaporean patient. Section 9 says explicitly what stands between this and that.
 
 ## 3. Cohorts and methods
 
