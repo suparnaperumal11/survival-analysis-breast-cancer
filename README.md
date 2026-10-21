@@ -18,6 +18,8 @@ Three of those boundaries are firm enough to state up front. The model ranks pat
 
 This is a methods project on published cohorts, not a validated clinical tool. Section 9 states what would have to change for it to become one.
 
+**My role.** An independent methods project: the question, the endpoint construction, the modelling, the diagnostics and this write-up are all mine.
+
 ## 2. Who would use this estimate, and at what point in care
 
 A model like this — hazard ratios for baseline prognostic factors, checked for proportional hazards violations, internally and externally validated — is the kind of analysis a hospital's clinical data or biostatistics team would build to support **prognostic counselling at the point of diagnosis and treatment planning**: after surgery, once pathology (tumour size, grade, nodal status) is known, before adjuvant treatment decisions are finalised. It is not a real-time risk calculator and it is not this analysis's job to be one — the model here is a demonstration of method, fit on data from the 1970s–90s, not a calibrated instrument ready for a 2026 Singaporean patient. Section 9 says explicitly what stands between this and that.
