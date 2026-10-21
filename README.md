@@ -1,6 +1,6 @@
 # Recurrence-Free Survival in Breast Cancer: A Cox Model with External Validation
 
-**[Read the rendered report](https://suparnaperumal11.github.io/Survival-analysis-breast-cancer/)** — the full analysis with figures and diagnostics, no R required.
+**[Read the rendered report](https://suparnaperumal11.github.io/survival-analysis-breast-cancer/)** — the full analysis with figures and diagnostics, no R required.
 
 A survival analysis of recurrence-free survival (RFS) in breast cancer, built on two published cohorts, to answer one question:
 
