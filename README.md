@@ -128,11 +128,12 @@ What it rules out: hormonal therapy's benefit is well established to depend on E
 
 - **`analysis.Rmd`** — the analysis itself: source code, methodological reasoning, and results, structured to be read top to bottom.
 - **`analysis.html`** — the rendered report (knit from `analysis.Rmd`); open this to read the analysis with figures and tables inline without running R.
+- **`sessioninfo.txt`** — R and package versions from the session that produced `analysis.html`.
 - **`README.md`** — this file.
 
 ## 12. Reproducing this analysis
 
-Requires R with the `survival`, `survminer`, `dplyr`, `tidyr`, `ggplot2`, `gtsummary`, `broom`, `survRM2`, `riskRegression`, `pec`, and `timeROC` packages installed, plus Pandoc (bundled with RStudio, or installed separately) for HTML rendering. Package versions were not pinned for this project; running with substantially newer versions of `riskRegression`, `pec`, or `timeROC` could in principle change output formatting, though the underlying methods are stable.
+Requires R with the `survival`, `survminer`, `dplyr`, `tidyr`, `ggplot2`, `gtsummary`, `broom`, `survRM2`, `riskRegression`, `pec`, and `timeROC` packages installed, plus Pandoc (bundled with RStudio, or installed separately) for HTML rendering. Exact package versions are recorded in [`sessioninfo.txt`](sessioninfo.txt) — `sessionInfo()` output from the session that knitted the committed `analysis.html`, so it describes what actually produced the numbers above rather than a later machine. The analysis was run under R 4.5.3 with `survival` 3.8-6, `riskRegression` 2026.03.11, `pec` 2025.06.24 and `timeROC` 0.4.1. Dependencies are not pinned with `renv`: the final chunk of `analysis.Rmd` calls `sessionInfo()`, so every rendered report carries its own provenance, and a lockfile built now would describe the current library rather than that run. Running substantially newer versions of `riskRegression`, `pec` or `timeROC` could change output formatting, though the underlying methods are stable.
 
 From an R session in this directory:
 
