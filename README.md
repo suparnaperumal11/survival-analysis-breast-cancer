@@ -1,10 +1,22 @@
 # Recurrence-Free Survival in Breast Cancer: A Cox Model with External Validation
 
-## 1. The question
+A survival analysis of recurrence-free survival (RFS) in breast cancer, built on two published cohorts, to answer one question:
 
-If a patient's age, tumour size, nodal involvement, grade, and treatment are known at diagnosis, how much of their risk of recurrence or death over the following years can be explained by a straightforward, auditable statistical model — and where does that model's honesty break down? This is a survival analysis of recurrence-free survival (RFS) in breast cancer, built on two published cohorts, with the proportional hazards assumption checked and reported rather than assumed, and the model's discrimination, calibration, and prediction error tested on data it wasn't fit to.
+> **What can a clinician honestly tell a patient about their recurrence risk at diagnosis — and where does a simple, auditable model stop being trustworthy?**
 
-This is a portfolio piece, not a validated clinical tool. It's an answer to "can this person do a defensible survival analysis in R," not "should this model be used to make a treatment decision."
+The hazard ratios are not the deliverable. The boundary is.
+
+---
+
+## 1. The decision this supports
+
+A patient asks, once surgery is done and pathology is back, what the next ten years look like. The honest answer has two halves: what the measured prognostic factors actually support, and the point past which the model answering the question is no longer reliable enough to quote. Both halves are the output here.
+
+Age, tumour size, nodal involvement, grade and treatment are all known at that moment. This analysis asks how much of the subsequent risk of recurrence or death those factors explain in a straightforward, auditable Cox model — and then spends most of its length establishing where that model's honesty breaks down. The proportional hazards assumption is tested and reported rather than assumed; four of seven covariates violate it and are re-fit accordingly; discrimination, calibration and prediction error are measured on data the model was never fit to.
+
+Three of those boundaries are firm enough to state up front. The model ranks patients only moderately well (concordance 0.674, optimism-corrected 0.6725), so it separates higher-risk from lower-risk profiles without resolving individuals. Four of its predictors have no single hazard ratio to quote, because their effect on the hazard measurably changes over follow-up. And both cohorts predate current treatment practice by three decades. What that supports is a conversation about relative risk — nodal burden dominates the profile, and by roughly this much. What it does not support is a number for one patient's ten-year recurrence probability.
+
+This is a methods project on published cohorts, not a validated clinical tool. Section 9 states what would have to change for it to become one.
 
 ## 2. Who would use this estimate, and at what point in care
 
