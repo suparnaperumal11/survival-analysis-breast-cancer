@@ -20,7 +20,7 @@ Three of those boundaries are firm enough to state up front. The model ranks pat
 
 This is a methods project on published cohorts, not a validated clinical tool. Section 9 states what would have to change for it to become one.
 
-**My role.** An independent methods project: the question, the endpoint construction, the modelling, the diagnostics and this write-up are all mine.
+**My role.** An independent methods project: the question, the endpoint construction, the modelling and the diagnostics are all mine.
 
 ## 2. Who would use this estimate, and at what point in care
 
@@ -149,3 +149,5 @@ This regenerates `analysis.html` from scratch, including all model fits, diagnos
 ---
 
 See `analysis.Rmd` (source) / `analysis.html` (rendered) for the full derivation, code, and diagnostic plots underlying every number above.
+
+Built with AI assistance; all design decisions, evaluation criteria and analysis are mine.
