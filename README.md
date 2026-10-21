@@ -128,7 +128,6 @@ What it rules out: hormonal therapy's benefit is well established to depend on E
 
 - **`analysis.Rmd`** — the analysis itself: source code, methodological reasoning, and results, structured to be read top to bottom.
 - **`analysis.html`** — the rendered report (knit from `analysis.Rmd`); open this to read the analysis with figures and tables inline without running R.
-- **`analysis_raw.Rmd`** — an earlier development snapshot, kept for reference only. `analysis.Rmd` is the current, correct version; nothing in `analysis_raw.Rmd` should be treated as authoritative.
 - **`README.md`** — this file.
 
 ## 12. Reproducing this analysis
