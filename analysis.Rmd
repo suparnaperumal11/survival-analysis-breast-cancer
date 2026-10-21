@@ -529,7 +529,7 @@ data.frame(
 )
 ```
 
-Both models discriminate best early and worst late, but not in the same way, and the comparison above is between a fully validated flat-model AUC and a hand-built landmark AUC for the time-varying model — not two instances of the same calculation. The flat model is fairly stable across horizons (75.2% → 71.8% → 69.8%). The time-varying model's landmark AUC is **higher** at 1 year (76.4%), **similar** at 5 years (71.9%), and **lower** at 10 years (63.0%) than the flat model's. This 10-year decline is not hidden or explained away: one plausible reason is that the linear-in-time interaction (`x * t`, chosen by AIC in Step 6) extrapolates each covariate's declining effect in a straight line, and by year 10 that straight-line extrapolation may have overshot — pushing some coefficients toward smaller or reversed values rather than genuinely tracking how risk behaves that far out. That's a plausible explanation, not a proven one; nothing here or in Step 6 formally tests it. What this does **not** show is that the time-varying model is worse overall — it was fit because Step 5's PH violations were real, not to maximize AUC, and its 1-year advantage is consistent with the effects Step 6 found to be strongest early in follow-up.
+Both models discriminate best early and worst late, but not in the same way, and the comparison above is between a fully validated flat-model AUC and a hand-built landmark AUC for the time-varying model — not two instances of the same calculation. The flat model is fairly stable across horizons (0.752 → 0.718 → 0.698). The time-varying model's landmark AUC is **higher** at 1 year (0.764), **similar** at 5 years (0.719), and **lower** at 10 years (0.630) than the flat model's. This 10-year decline is not hidden or explained away: one plausible reason is that the linear-in-time interaction (`x * t`, chosen by AIC in Step 6) extrapolates each covariate's declining effect in a straight line, and by year 10 that straight-line extrapolation may have overshot — pushing some coefficients toward smaller or reversed values rather than genuinely tracking how risk behaves that far out. That's a plausible explanation, not a proven one; nothing here or in Step 6 formally tests it. What this does **not** show is that the time-varying model is worse overall — it was fit because Step 5's PH violations were real, not to maximize AUC, and its 1-year advantage is consistent with the effects Step 6 found to be strongest early in follow-up.
 
 ## Calibration
 
@@ -569,7 +569,7 @@ The Brier score is the mean squared difference between predicted event probabili
 sc_flat$Brier$score
 ```
 
-The Cox model beats the null model at every horizon (e.g., at 5 years: 20.7% vs. 24.5%), which is consistent with the covariates adding real predictive information beyond the marginal survival curve — a different angle on the same question the AUC and calibration results above address, not a repeat of them.
+The Cox model beats the null model at every horizon (e.g., at 5 years: 0.207 vs. 0.245), which is consistent with the covariates adding real predictive information beyond the marginal survival curve — a different angle on the same question the AUC and calibration results above address, not a repeat of them.
 
 ```{r ibs}
 p_ibs <- pec(list("Cox" = dev_fit), formula = Surv(rfstime_yrs, rfs_event) ~ 1,
@@ -639,7 +639,7 @@ sc_ext$AUC$score
 sc_ext$Brier$score
 ```
 
-External time-dependent AUC is 73.3% (95% CI 66.8–79.9) at 1 year and 71.2% (65.9–76.5) at 5 years — close to the internal apparent values from Step 7 (75.2%, 71.8%), and within each other's confidence intervals. External Brier score is 7.4% at 1 year and 21.7% at 5 years, both below the null (no-covariate) model's 7.7% and 25.0% — the model still beats an uninformative baseline on external data it wasn't fit to.
+External time-dependent AUC is 0.733 (95% CI 0.668–0.799) at 1 year and 0.712 (0.659–0.765) at 5 years — close to the internal apparent values from Step 7 (0.752, 0.718), and within each other's confidence intervals. External Brier score is 0.074 at 1 year and 0.217 at 5 years, both below the null (no-covariate) model's 0.077 and 0.250 — the model still beats an uninformative baseline on external data it wasn't fit to.
 
 ```{r validation-calibration-slope}
 lp_ext    <- predict(dev_fit, newdata = gbsg, type = "lp")
@@ -759,9 +759,9 @@ knitr::kable(data.frame(
   Value = c(
     paste0(round(apparent_c, 4), " (se 0.007)"),
     round(corrected_c, 4),
-    "75.2% / 71.8% / 69.8%",
+    "0.752 / 0.718 / 0.698",
     "1.00 (near-tautological on training data — see Section 7.3)",
-    "7.5% / 20.7% / 21.2% vs. 8.1% / 24.5% / 23.9%",
+    "0.075 / 0.207 / 0.212 vs. 0.081 / 0.245 / 0.239",
     "0.179 vs. 0.205"
   )
 ))
@@ -779,9 +779,9 @@ knitr::kable(data.frame(
   ),
   Value = c(
     "0.664 (se 0.016)",
-    "73.3% / 71.2%",
+    "0.733 / 0.712",
     "1.13 (se 0.12)",
-    "7.4% / 21.7% vs. 7.7% / 25.0%"
+    "0.074 / 0.217 vs. 0.077 / 0.250"
   )
 ))
 ```
@@ -791,7 +791,7 @@ knitr::kable(data.frame(
 ```{r performance-summary-tv}
 knitr::kable(data.frame(
   Metric = "Landmark time-specific AUC, 1 / 5 / 10y (hand-derived score + timeROC, apparent/in-sample)",
-  Value  = "76.4% / 71.9% / 63.0%"
+  Value  = "0.764 / 0.719 / 0.630"
 ))
 ```
 
@@ -801,7 +801,7 @@ knitr::kable(data.frame(
 
 **In summary**: this is a prognostic Cox model for recurrence-free survival, developed on `rotterdam`, diagnosed for proportional-hazards violations and refit with time-varying coefficients where those violations were real (Sections 5–6), and validated both internally (Section 7) and externally (Section 8), as far as each model's tooling allowed. `hormon` and `chemo` hazard ratios throughout are adjusted *associations*, not causal treatment effects (Section 3, Section 4); Section 10's cause-specific decomposition adds detail without changing that status.
 
-**On discrimination**: for the flat model, concordance and time-dependent AUC — apparent, optimism-corrected, and external — sit in the high-60s to mid-70s percent range. That's a real but moderate ability to rank patients, not the discrimination that would support using this model for individual patient risk stratification. The time-varying model's landmark AUC (Section 7.2, apparent/in-sample, not the same calculation as the flat model's) is higher at 1 year, similar at 5, and lower at 10 than the flat model's — a real pattern, not an artefact, and no optimism-corrected or external version of it exists.
+**On discrimination**: for the flat model, concordance and time-dependent AUC — apparent, optimism-corrected, and external — sit between roughly 0.66 and 0.75. That's a real but moderate ability to rank patients, not the discrimination that would support using this model for individual patient risk stratification. The time-varying model's landmark AUC (Section 7.2, apparent/in-sample, not the same calculation as the flat model's) is higher at 1 year, similar at 5, and lower at 10 than the flat model's — a real pattern, not an artefact, and no optimism-corrected or external version of it exists.
 
 **On calibration**: the internal calibration slope (Section 7.3) is close to tautological — calculated on the same data the model was fit to — and is labelled as an apparent, development-data figure rather than presented as a genuine calibration test. The external calibration slope (1.13, se 0.12, Section 8) is the real test, since it's calculated on data the model never saw, and it's consistent with reasonable calibration. The uncertainty around it is wide enough that "consistent with" is the right level of confidence — not "well calibrated" or "confirmed."
 
