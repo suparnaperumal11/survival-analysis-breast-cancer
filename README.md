@@ -1,5 +1,7 @@
 # Recurrence-Free Survival in Breast Cancer: A Cox Model with External Validation
 
+**[Read the rendered report](https://suparnaperumal11.github.io/Survival-analysis-breast-cancer/)** — the full analysis with figures and diagnostics, no R required.
+
 A survival analysis of recurrence-free survival (RFS) in breast cancer, built on two published cohorts, to answer one question:
 
 > **What can a clinician honestly tell a patient about their recurrence risk at diagnosis — and where does a simple, auditable model stop being trustworthy?**
@@ -128,6 +130,7 @@ What it rules out: hormonal therapy's benefit is well established to depend on E
 
 - **`analysis.Rmd`** — the analysis itself: source code, methodological reasoning, and results, structured to be read top to bottom.
 - **`analysis.html`** — the rendered report (knit from `analysis.Rmd`); open this to read the analysis with figures and tables inline without running R.
+- **`index.html`** — redirect to `analysis.html`, so the GitHub Pages root URL opens the report.
 - **`sessioninfo.txt`** — R and package versions from the session that produced `analysis.html`.
 - **`README.md`** — this file.
 
