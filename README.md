@@ -20,7 +20,7 @@ This is a methods project on published cohorts, not a validated clinical tool. S
 
 ## 2. Who would use this estimate, and at what point in care
 
-A model like this — hazard ratios for baseline prognostic factors, checked for proportional hazards violations, internally and externally validated — is the kind of analysis a hospital's clinical data or biostatistics team would build to support **prognostic counselling at the point of diagnosis and treatment planning**: after surgery, once pathology (tumour size, grade, nodal status) is known, before adjuvant treatment decisions are finalised. It is not a real-time risk calculator and it is not this analysis's job to be one — the model here is a demonstration of method, fit on data from the 1970s–90s, not a calibrated instrument ready for a 2026 Singaporean patient. Section 8 says explicitly what stands between this and that.
+A model like this — hazard ratios for baseline prognostic factors, checked for proportional hazards violations, internally and externally validated — is the kind of analysis a hospital's clinical data or biostatistics team would build to support **prognostic counselling at the point of diagnosis and treatment planning**: after surgery, once pathology (tumour size, grade, nodal status) is known, before adjuvant treatment decisions are finalised. It is not a real-time risk calculator and it is not this analysis's job to be one — the model here is a demonstration of method, fit on data from the 1970s–90s, not a calibrated instrument ready for a 2026 Singaporean patient. Section 9 says explicitly what stands between this and that.
 
 ## 3. Cohorts and methods
 
@@ -37,7 +37,7 @@ Full derivations, diagnostic checks, and code are in `analysis.Rmd` / `analysis.
 
 ## 4. Key results
 
-- **Unadjusted**, patients who received hormonal therapy had *worse* recurrence-free survival (median 4.78 vs. 7.15 years, log-rank p = 3×10⁻⁴). **Adjusted** for age, size, nodes, grade, and chemotherapy, the direction reverses: hazard ratio 0.68 (95% CI 0.58–0.79, p = 1.1×10⁻⁶) — a 32% lower hazard. This is confounding by indication, not a treatment paradox: hormonal therapy was preferentially given to higher-risk patients, and the unadjusted comparison reflects that risk imbalance more than the treatment itself. Even the adjusted estimate only controls for the confounders measured here — see Section 7.
+- **Unadjusted**, patients who received hormonal therapy had *worse* recurrence-free survival (median 4.78 vs. 7.15 years, log-rank p = 3×10⁻⁴). **Adjusted** for age, size, nodes, grade, and chemotherapy, the direction reverses: hazard ratio 0.68 (95% CI 0.58–0.79, p = 1.1×10⁻⁶) — a 32% lower hazard. This is confounding by indication, not a treatment paradox: hormonal therapy was preferentially given to higher-risk patients, and the unadjusted comparison reflects that risk imbalance more than the treatment itself. Even the adjusted estimate only controls for the confounders measured here — see Section 8.
 - **Strongest predictor**: nodal burden (log(nodes+1)), hazard ratio 1.76 per unit (95% CI 1.66–1.86, p < 10⁻⁸⁰) in the time-fixed model — though its effect is not actually time-fixed (Section 6).
 - **Tumour size** and **grade 3** (vs. grade 2) both independently elevated hazard (size >50mm: HR 1.61, 95% CI 1.37–1.90; grade 3: HR 1.40, 95% CI 1.25–1.58).
 - **Age and menopausal status** showed no independent association in the time-fixed model (both p > 0.8) — but age's effect is not actually time-fixed either (Section 6).
@@ -67,7 +67,29 @@ The fix used was time-varying coefficients (`tt()` in `coxph`) for the four viol
 
 A further, harder limitation surfaced once validation began: `concordance()`, `survfit()`, and `pec()` all refuse a `coxph` object containing `tt()` terms — a documented limitation of the R `survival` package, confirmed directly rather than assumed. That's why the time-varying model's discrimination is assessed separately (landmark scores at fixed horizons, Section 5) rather than with the same bootstrap/calibration/Brier machinery used for the flat model — there is currently no equivalent optimism-corrected, calibration, or Brier figure for the time-varying model in this analysis, and that gap is reported rather than papered over.
 
-## 7. Limitations
+## 7. What I chose not to build, and why
+
+**Time-varying coefficients instead of stratification.** Four of the seven covariates — `age`, `size`, `log(nodes+1)`, `grade` — violate proportional hazards. Two standard fixes exist: stratification, which fits a separate baseline hazard per level of the offending variable, and time-varying coefficients, which keep a hazard ratio but let it be a function of follow-up time. Stratification is the more conservative choice and it was rejected. `size` and `grade` are exactly the two variables a prognostic conversation needs a reported hazard ratio for, and stratifying a variable discards its hazard ratio entirely. `age` and `log(nodes+1)` are continuous, so stratifying them would have meant binning them first — an arbitrary cut made to satisfy an assumption, not because the data suggested one.
+
+What the trade bought: a documented, interpretable effect for all four, and one finding stratification would have buried. `age`'s per-year hazard ratio drifts from ≈0.98 early in follow-up to ≈1.05 by year 14 — younger patients carrying more aggressive early recurrence risk, older patients rising competing-cause mortality later. Stratification would have absorbed that into the baseline hazard instead of reporting it.
+
+What it cost, which is the larger half: `concordance()`, `survfit()` and `pec()` all refuse a `coxph` object containing `tt()` terms. So the model this analysis considers correct is the one that cannot be put through standard validation, and a separate time-fixed model carries the calibration, Brier and bootstrap results instead. Four predictors have no single hazard ratio to quote — they are reported at 1/5/10-year horizons — and `grade`'s time-interaction term did not reach significance on its own, even though the joint likelihood-ratio test and the residual plot both supported keeping it.
+
+**No Fine-Gray / competing-risks model.** Death without recurrence is a competing event, and the composite RFS endpoint absorbs it rather than modelling it. The sensitivity check in Section 4 uses cause-specific hazards instead. The reason is that a Fine-Gray model answers a different question — a covariate's effect on the absolute, population-level cumulative incidence of one event type when a competing event can preclude it. That is the right tool for absolute-risk prediction and the wrong one for a prognostic-factor study, which this has been throughout; cause-specific hazards are the direct extension of the Cox models used everywhere else here.
+
+The consequence is a question this analysis cannot answer: the absolute probability of recurrence as distinct from death. The cause-specific check establishes that hormonal therapy's association points the same way for both components of the endpoint (HR 0.69 recurrence, HR 0.75 death), so the composite result is not an artefact of one component. It does not quantify how much of the composite hazard ratio comes from either, and shouldn't be read as doing so. A patient asking "how likely is it to come back, specifically" needs the Fine-Gray model that was not fit.
+
+**No causal claim about the treatment effect.** The most striking number in the analysis is a reversal: hormonal therapy looks harmful unadjusted (median RFS 4.78 vs. 7.15 years, log-rank p = 3×10⁻⁴) and protective adjusted (HR 0.68, 95% CI 0.58–0.79). That is confounding by indication — hormonal therapy was preferentially given to higher-risk patients — recovered by adjustment. It is an adjusted association, not a treatment-effect estimate, and no attempt was made to turn it into one.
+
+The reason is that nothing in the design supports it. Treatment assignment in `rotterdam` is observational and non-randomised, and a Cox model adjusts for measured confounders only. Receptor status and comorbidity both plausibly drove who was treated, and neither is in the model. A propensity-score or marginal-structural approach would have produced a causal-looking estimate resting on exactly the same unverifiable assumption of no unmeasured confounding, in heavier machinery — the inferential problem here is the data, not the estimator.
+
+The consequence is that every treatment number in this repository is associational. The RMST figure needs the most care, because "recurrence-free life-years" invites a causal reading: it is unadjusted, it carries the same confounding-by-indication caveat as the raw Kaplan-Meier comparison, and it is reported that way rather than quietly promoted to a benefit estimate.
+
+**No receptor status — a scope decision, not a data limitation.** `rotterdam` and `gbsg` both carry `er` and `pgr` as continuous assay values (fmol/l), complete for all 2,982 development patients. The model does not use them. The covariate set was fixed to the baseline clinical and treatment factors shared across both cohorts, and receptor concentrations were left out of it. Of everything on this list, that is the choice I would revisit first.
+
+What it rules out: hormonal therapy's benefit is well established to depend on ER/PR status, so the 0.68 hazard ratio is averaging over patients for whom the treatment mechanism does not apply at all. No receptor-stratified or receptor-interacted estimate is available, and the unmeasured-confounding caveat on the treatment association is partly self-inflicted — one of the named confounders is sitting in the dataset, unused. HER2 is genuinely absent from both cohorts, so a modern three-marker subtype model is out of reach from this data regardless of scope.
+
+## 8. Limitations
 
 - **Non-informative censoring is assumed and cannot be tested from these data.** If patients were lost to follow-up for reasons related to their unobserved prognosis (e.g., moved because they were too sick to continue treatment locally), the survival estimates here would be biased in a way this analysis cannot detect or correct.
 - **Both cohorts predate current breast cancer treatment practice by three decades.** `rotterdam` spans surgeries from 1978–1993; treatment protocols, staging technology, and hormonal/chemotherapy regimens have changed substantially since. The hazard ratios reported here describe risk relationships under 1980s–90s-era treatment, not current standard of care.
@@ -78,7 +100,7 @@ A further, harder limitation surfaced once validation began: `concordance()`, `s
 - **The competing-risk sensitivity check uses cause-specific, not Fine-Gray, hazards.** It answers whether `hormon` and `log(nodes+1)`'s associations look consistent across the recurrence and death components of RFS — it does not estimate either component's absolute, population-level cumulative incidence, which a Fine-Gray model would be needed for and was not fit here.
 - **Adjustment is only as good as what was measured.** The hormonal-therapy hazard ratio (0.68) accounts for the confounders available in `rotterdam` — it cannot rule out unmeasured confounders (e.g., hormone receptor status, comorbidities) that also influenced who received treatment.
 
-## 8. What would be needed to use this for real
+## 9. What would be needed to use this for real
 
 - **A contemporary cohort**, ideally from the target population (Singapore), with modern staging (including receptor status — ER/PR/HER2 — which neither cohort's model here uses despite both containing `pgr`/`er` fields) and current treatment protocols.
 - **Calibration and discrimination assessed on a cohort that isn't restricted to a single risk subgroup and to a 7.3-year horizon** — the calibration and time-dependent AUC work here (Section 5) is a start, not a substitute for testing on an unselected, longer-follow-up population.
@@ -87,7 +109,7 @@ A further, harder limitation surfaced once validation began: `concordance()`, `s
 - **Receptor-status stratification.** Hormonal therapy's benefit is well established to depend heavily on ER/PR status; a model that doesn't stratify or interact on receptor status is averaging over patients for whom the treatment mechanism doesn't even apply.
 - **Cost data**, if the eventual use case is a resource-allocation or cost-effectiveness decision rather than a purely clinical-risk one — nothing here currently supports that.
 
-## 9. Selected methodological references
+## 10. Selected methodological references
 
 - Cox, D.R. (1972) — the proportional hazards model underlying every Cox fit in this analysis.
 - Grambsch & Therneau (1994) — the scaled Schoenfeld residual test (`cox.zph()`) used for the proportional-hazards check (Section 6).
@@ -100,14 +122,14 @@ A further, harder limitation surfaced once validation began: `concordance()`, `s
 - Foekens et al. (2000) — the original cohort study underlying the `rotterdam` development data (Section 3).
 - Schumacher et al. (1994) — the GBSG-2 trial underlying the `gbsg` external validation cohort, including its node-positive-only enrollment (Section 3).
 
-## 10. Files in this project
+## 11. Files in this project
 
 - **`analysis.Rmd`** — the analysis itself: source code, methodological reasoning, and results, structured to be read top to bottom.
 - **`analysis.html`** — the rendered report (knit from `analysis.Rmd`); open this to read the analysis with figures and tables inline without running R.
 - **`analysis_raw.Rmd`** — an earlier development snapshot, kept for reference only. `analysis.Rmd` is the current, correct version; nothing in `analysis_raw.Rmd` should be treated as authoritative.
 - **`README.md`** — this file.
 
-## 11. Reproducing this analysis
+## 12. Reproducing this analysis
 
 Requires R with the `survival`, `survminer`, `dplyr`, `tidyr`, `ggplot2`, `gtsummary`, `broom`, `survRM2`, `riskRegression`, `pec`, and `timeROC` packages installed, plus Pandoc (bundled with RStudio, or installed separately) for HTML rendering. Package versions were not pinned for this project; running with substantially newer versions of `riskRegression`, `pec`, or `timeROC` could in principle change output formatting, though the underlying methods are stable.
 
